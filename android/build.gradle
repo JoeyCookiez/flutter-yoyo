@@ -1,0 +1,48 @@
+buildscript {
+    ext.kotlin_version = '1.7.10'
+    repositories {
+        // 国内镜像源
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        // 备用镜像（包含 Maven Central 的镜像，无需再直接访问 repo.maven.apache.org）
+        maven { url 'https://mirrors.huaweicloud.com/repository/maven' }
+        google()
+        // 不再直接使用 mavenCentral()，避免访问 repo.maven.apache.org 导致 TLS 握手失败
+        // mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.2.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        // 国内镜像源
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        // 备用镜像（包含 Maven Central 的镜像，无需再直接访问 repo.maven.apache.org）
+        maven { url 'https://mirrors.huaweicloud.com/repository/maven' }
+        google()
+        // 不再直接使用 mavenCentral()，避免访问 repo.maven.apache.org 导致 TLS 握手失败
+        // mavenCentral()
+
+        // 如果需要其他特殊仓库
+        maven { url 'https://storage.googleapis.com/download.flutter.io' } // Flutter仓库
+    }
+}
+
+rootProject.buildDir = '../build'
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(':app')
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
