@@ -90,8 +90,7 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     // 作为新加入的会议成员，其作为发起方向其他用户发送 P2P 连接请求 offer
     for (var member in _members) {
       if (_userInfo!.userId != member.userId) {
-        final RTCPeerConnection peerConnection = await createWebRTC();
-        peerConnectionMap[member.userId] = peerConnection;
+        final RTCPeerConnection peerConnection = await _getOrCreatePeer(member.userId);
 
         final offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
@@ -104,6 +103,16 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
         });
       }
     }
+  }
+
+  /// 获取或创建对端连接，保证收到信令时能找到对应的 PeerConnection
+  Future<RTCPeerConnection> _getOrCreatePeer(String userId) async {
+    if (peerConnectionMap[userId] != null) {
+      return peerConnectionMap[userId]!;
+    }
+    final RTCPeerConnection peerConnection = await createWebRTC();
+    peerConnectionMap[userId] = peerConnection;
+    return peerConnection;
   }
 
   void sendPeerMessage(Map<String, dynamic> params) {
@@ -290,19 +299,45 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
         // 1: 加入会议
         case 1:
           print("收到新增用户消息 $message");
+          final newUserId = content["userId"]?.toString();
+          final newNick = content["nickName"]?.toString() ?? '新成员';
+          if (newUserId != null && newUserId.isNotEmpty) {
+            final exists = _members.any((m) => m.userId == newUserId);
+            if (!exists) {
+              setState(() {
+                _members.add(MeetingMember(
+                  userId: newUserId,
+                  nickName: newNick,
+                  avatarUrl: content["avatarUrl"]?.toString(),
+                  openVideo: content["openVideo"] == true,
+                  openMicro: content["openMicro"] != false,
+                ));
+              });
+              // 向新成员发起 offer
+              final pc = await _getOrCreatePeer(newUserId);
+              final offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendPeerMessage({
+                'sendUserId': _userInfo?.userId,
+                'receiveUserId': newUserId,
+                'signalType': 'offer',
+                'signalData': {'sdp': offer.sdp, 'type': offer.type},
+              });
+            }
+          }
           break;
         // 2: 对等连接信令
         case 2:
           // 如果是自己发出的 peer 消息，忽略
           if (sendUserId == _userInfo?.userId) break;
+          if (sendUserId == null || sendUserId.isEmpty) {
+            print('缺少 sendUserId，忽略该信令');
+            break;
+          }
 
           final peerType = content["signalType"];
           final signalData = content["signalData"];
-          RTCPeerConnection? remotePeerConnection = peerConnectionMap[sendUserId];
-          if (remotePeerConnection == null) {
-            print('未找到对应的 PeerConnection $sendUserId');
-            break;
-          }
+          final RTCPeerConnection remotePeerConnection = await _getOrCreatePeer(sendUserId!);
           switch (peerType) {
             case 'offer':
               try {
