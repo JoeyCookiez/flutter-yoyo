@@ -37,6 +37,11 @@ dependencies:
   cupertino_icons: ^1.0.2
   # HTTP 请求库（使用兼容 Dart 2.19.6 的版本）
   http: ^0.13.5
+  # WebSocket 客户端，用于连接信令服务器
+  web_socket_channel: ^2.4.0
+  # 本地存储，用于持久化用户信息
+  shared_preferences: ^2.2.2
+  flutter_webrtc: ^0.9.0
 
 dev_dependencies:
   flutter_test:
