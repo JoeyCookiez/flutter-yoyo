@@ -10,6 +10,7 @@ import 'package:flutter_yoyo/models/user_model.dart';
 import 'package:flutter_yoyo/services/meeting_service.dart';
 import 'package:flutter_yoyo/services/signal_service.dart';
 import 'package:flutter_yoyo/services/storage_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../models/message_model.dart';
 
@@ -41,9 +42,23 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
   StreamSubscription? _signalMsgSub;
   StreamSubscription? _signalStatusSub;
   late Map<String, RTCPeerConnection> peerConnectionMap;
-  
+  MediaStream? _localStream;
+  RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+
   int get _pageSize => _currentLayout == 4 ? 4 : 9;
   int get _totalPages => max(1, (_members.length / _pageSize).ceil());
+  final Map<String, dynamic> _constraints = {
+    'audio': true,
+    'video': {
+      'mandatory': {
+        'minWidth': '640',
+        'minHeight': '480',
+        'minFrameRate': '30',
+      },
+      'facingMode': 'user',
+      'optional': [],
+    }
+  };
 
   List<MeetingMember> get _visibleMembers {
     final start = _currentPage * _pageSize;
@@ -56,18 +71,20 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     _micOn = widget.args.microOn;
     _cameraOn = widget.args.videoOn;
     _audioOn = widget.args.audioOn;
-    _members = _buildMockMembers();
+    _members = [];
     _startAt = DateTime.now();
     peerConnectionMap = {};
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
     _initAsync();
+    _initializeRenderers();
   }
 
   Future<void> _initAsync() async {
     // 获取 userInfo
     _userInfo = await StorageService.instance.getUserInfo();
+    _ensureSelfMember();
     // 订阅信令服务器回调
     _signalMsgSub = SignalService.instance.messageStream.listen(_handleSignalMessage);
     _signalStatusSub = SignalService.instance.statusStream.listen(_handleSignalStatus);
@@ -80,6 +97,7 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     _timer?.cancel();
     _signalMsgSub?.cancel();
     _signalStatusSub?.cancel();
+    _localRenderer.dispose();
     super.dispose();
   }
   /* 初始化会议室
@@ -90,18 +108,26 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     // 作为新加入的会议成员，其作为发起方向其他用户发送 P2P 连接请求 offer
     for (var member in _members) {
       if (_userInfo!.userId != member.userId) {
-        final RTCPeerConnection peerConnection = await _getOrCreatePeer(member.userId);
-
-        final offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-
-        sendPeerMessage({
-          'sendUserId': _userInfo?.userId,
-          'receiveUserId': member.userId,
-          'signalType': 'offer',
-          'signalData': {'sdp': offer.sdp, 'type': offer.type},
-        });
+        await _sendOfferTo(member.userId);
       }
+    }
+  }
+
+  /// 确保本人的成员信息存在列表中
+  void _ensureSelfMember() {
+    if (_userInfo == null) return;
+    final exists = _members.any((m) => m.isSelf || m.userId == _userInfo!.userId);
+    if (!exists) {
+      _members.insert(
+        0,
+        MeetingMember(
+          userId: _userInfo!.userId ?? 'self',
+          nickName: widget.args.nickName,
+          isSelf: true,
+          openVideo: _cameraOn,
+          openMicro: _micOn,
+        ),
+      );
     }
   }
 
@@ -113,6 +139,19 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     final RTCPeerConnection peerConnection = await createWebRTC();
     peerConnectionMap[userId] = peerConnection;
     return peerConnection;
+  }
+
+  /// 创建并发送 offer 给指定用户
+  Future<void> _sendOfferTo(String userId) async {
+    final peerConnection = await _getOrCreatePeer(userId);
+    final offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    sendPeerMessage({
+      'sendUserId': _userInfo?.userId,
+      'receiveUserId': userId,
+      'signalType': 'offer',
+      'signalData': {'sdp': offer.sdp, 'type': offer.type},
+    });
   }
 
   void sendPeerMessage(Map<String, dynamic> params) {
@@ -149,19 +188,19 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
     return peerConnection;
   }
 
-
-  List<MeetingMember> _buildMockMembers() {
-    final self = MeetingMember(
-      userId: 'self',
-      nickName: widget.args.nickName,
-      isSelf: true,
-      openVideo: _cameraOn,
-      openMicro: _micOn,
+  MeetingMember _mapMember(Map<String, dynamic> data) {
+    final userId = data['userId']?.toString() ?? '';
+    final nickName = data['nickName']?.toString() ?? '成员';
+    return MeetingMember(
+      userId: userId.isNotEmpty ? userId : 'unknown',
+      nickName: nickName,
+      avatarUrl: data['avatarUrl']?.toString(),
+      openVideo: data['openVideo'] == true,
+      openMicro: data['openMicro'] != false,
+      isSelf: _userInfo != null && userId == _userInfo!.userId,
     );
-    final others = [
-    ];
-    return [self, ...others];
   }
+
 
   void _syncSelfMember() {
     final index = _members.indexWhere((member) => member.isSelf);
@@ -170,7 +209,15 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
       _members[index].openMicro = _micOn;
     }
   }
-
+  Future<bool> _requestPermissions() async {
+    final cameraStatus = await Permission.camera.request();
+    final micStatus = await Permission.microphone.request();
+    
+    return cameraStatus.isGranted && micStatus.isGranted;
+  }
+  Future<void> _initializeRenderers() async {
+    await _localRenderer.initialize();
+  }
   void _toggleMic() {
     setState(() {
       _micOn = !_micOn;
@@ -180,9 +227,11 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
   }
 
   void _toggleCamera() {
-    setState(() {
+    setState(() async {
       _cameraOn = !_cameraOn;
       _syncSelfMember();
+      _localStream = await navigator.mediaDevices.getUserMedia(_constraints);
+      _localRenderer.srcObject = _localStream;
     });
     _showSnack(_cameraOn ? '摄像头已开启' : '摄像头已关闭');
   }
@@ -299,30 +348,47 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
         // 1: 加入会议
         case 1:
           print("收到新增用户消息 $message");
-          final newUserId = content["userId"]?.toString();
-          final newNick = content["nickName"]?.toString() ?? '新成员';
-          if (newUserId != null && newUserId.isNotEmpty) {
-            final exists = _members.any((m) => m.userId == newUserId);
+          final List<dynamic>? memberListRaw = content['meetingMemberList'] as List?;
+          final newMemberId = content['newMember']?['userId']?.toString() ??
+              content['userId']?.toString();
+
+          if (memberListRaw != null) {
+            final parsed = memberListRaw
+                .map((e) => _asMap(e))
+                .whereType<Map<String, dynamic>>()
+                .map(_mapMember)
+                .toList();
+            setState(() {
+              _members = parsed;
+              _ensureSelfMember();
+            });
+          } else if (newMemberId != null && newMemberId.isNotEmpty) {
+            final exists = _members.any((m) => m.userId == newMemberId);
             if (!exists) {
               setState(() {
                 _members.add(MeetingMember(
-                  userId: newUserId,
-                  nickName: newNick,
+                  userId: newMemberId,
+                  nickName: content["nickName"]?.toString() ?? '新成员',
                   avatarUrl: content["avatarUrl"]?.toString(),
                   openVideo: content["openVideo"] == true,
                   openMicro: content["openMicro"] != false,
                 ));
               });
-              // 向新成员发起 offer
-              final pc = await _getOrCreatePeer(newUserId);
-              final offer = await pc.createOffer();
-              await pc.setLocalDescription(offer);
-              sendPeerMessage({
-                'sendUserId': _userInfo?.userId,
-                'receiveUserId': newUserId,
-                'signalType': 'offer',
-                'signalData': {'sdp': offer.sdp, 'type': offer.type},
-              });
+            }
+          }
+
+          // 新成员加入，按桌面端逻辑建立 P2P
+          if (_userInfo != null && newMemberId != null && newMemberId.isNotEmpty) {
+            if (newMemberId == _userInfo!.userId) {
+              // 自己加入，向现有成员发起 offer
+              for (final member in _members) {
+                if (member.userId != _userInfo!.userId) {
+                  await _sendOfferTo(member.userId);
+                }
+              }
+            } else {
+              // 其他成员加入，向该成员发起 offer
+              await _sendOfferTo(newMemberId);
             }
           }
           break;
@@ -396,6 +462,29 @@ class _MeetingRoomScreenState extends State<MeetingRoomScreen> {
           break;
         // 3: 退出会议
         case 3:
+          final exitJson = _asMap(contentRaw) ?? {};
+          final exitUserId = exitJson['exitUserId']?.toString();
+          final memberDtoList = exitJson['meetingMemberDtoList'] as List?;
+          if (memberDtoList != null) {
+            final parsed = memberDtoList
+                .map((e) => _asMap(e))
+                .whereType<Map<String, dynamic>>()
+                .map(_mapMember)
+                .toList();
+            setState(() {
+              _members = parsed;
+              _ensureSelfMember();
+            });
+          } else if (exitUserId != null) {
+            setState(() {
+              _members.removeWhere((m) => m.userId == exitUserId);
+            });
+          }
+          if (exitUserId != null && peerConnectionMap.containsKey(exitUserId)) {
+            peerConnectionMap[exitUserId]?.close();
+            peerConnectionMap.remove(exitUserId);
+          }
+          break;
         // 5: 聊天文本
         case 5:
         // 6: 聊天媒体
